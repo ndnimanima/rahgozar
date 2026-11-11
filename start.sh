@@ -6,10 +6,10 @@ set -Eeuo pipefail
 # ============================================================
 
 APP_DIR="${RAHGOZAR_APP_DIR:-/opt/Rahgozar}"
-REPO="${RAHGOZAR_REPO:-https://github.com/your-username/Rahgozar.git}"
+REPO="${RAHGOZAR_REPO:-https://github.com/ndnimanima/rahgozar.git}"
 BRANCH="${RAHGOZAR_BRANCH:-main}"
 
-INSTALLER_URL="${RAHGOZAR_INSTALLER_URL:-https://raw.githubusercontent.com/your-username/Rahgozar/main/start.sh}"
+INSTALLER_URL="${RAHGOZAR_INSTALLER_URL:-https://raw.githubusercontent.com/ndnimanima/rahgozar/main/start.sh}"
 
 ENV_FILE="/etc/rahgozar.env"
 SERVICE="rahgozar"

@@ -1,7 +1,8 @@
-// SpiderPanel — managed Cloudflare Pages Worker
+// Rahgozar — managed Cloudflare Pages Worker
 // VLESS over WebSocket/TLS, one canonical route per user: /ws/{uuid}
 // The panel injects __PANEL_TOKEN__, __PANEL_DOMAIN__ and __WORKER_DOMAIN__
-// during deployment. SPIDER_KV is a Pages KV binding configured by the panel.
+// during deployment. RAHGOZAR_KV is a Pages KV binding configured by the panel.
+// Older deployments may still expose SPIDER_KV; panelKV() accepts both.
 
 import { connect } from "cloudflare:sockets";
 
@@ -124,15 +125,21 @@ function responseHeader(version) {
 }
 
 // ── KV user state ───────────────────────────────────────────────────────────
+function panelKV(env) {
+  // RAHGOZAR_KV is the current binding name; SPIDER_KV is accepted for
+  // worker projects deployed by older builds of the panel.
+  return (env && (env.RAHGOZAR_KV || env.SPIDER_KV)) || null;
+}
 async function kvReady(env) {
-  return !!(env && env.SPIDER_KV && typeof env.SPIDER_KV.get === "function");
+  const kv = panelKV(env);
+  return !!(kv && typeof kv.get === "function");
 }
 
 async function getUser(env, rawUuid) {
   const uuid = normalizeUuid(rawUuid);
   if (!uuid || !(await kvReady(env))) return null;
   try {
-    const raw = await env.SPIDER_KV.get(`user:${uuid}`);
+    const raw = await panelKV(env).get(`user:${uuid}`);
     if (!raw) return null;
     const user = JSON.parse(raw);
     if (!user || normalizeUuid(user.uuid) !== uuid) return null;
@@ -146,7 +153,7 @@ async function getUser(env, rawUuid) {
 }
 
 async function setUser(env, uuid, user) {
-  await env.SPIDER_KV.put(`user:${uuid}`, JSON.stringify(user));
+  await panelKV(env).put(`user:${uuid}`, JSON.stringify(user));
 }
 
 // KV does not provide an atomic increment for these simple records, so usage
@@ -181,7 +188,7 @@ async function flushUsage(env, uuid, meter) {
 // ── Concurrent IP guard ─────────────────────────────────────────────────────
 async function getIpRecord(env, uuid) {
   try {
-    const raw = await env.SPIDER_KV.get(`ips:${uuid}`);
+    const raw = await panelKV(env).get(`ips:${uuid}`);
     return raw ? JSON.parse(raw) : { ips: [] };
   } catch (_) {
     return { ips: [] };
@@ -189,7 +196,7 @@ async function getIpRecord(env, uuid) {
 }
 
 async function saveIpRecord(env, uuid, record) {
-  try { await env.SPIDER_KV.put(`ips:${uuid}`, JSON.stringify(record)); } catch (_) {}
+  try { await panelKV(env).put(`ips:${uuid}`, JSON.stringify(record)); } catch (_) {}
 }
 
 async function touchIp(env, uuid, ip, maxIps) {
@@ -710,7 +717,7 @@ async function proxyConnect(proxy, targetHost, targetPort) {
 
     const hostHeader = targetHost.includes(":") ? `[${targetHost}]` : targetHost;
     const auth = proxy.username ? `Proxy-Authorization: Basic ${btoa(`${proxy.username}:${proxy.password || ""}`)}\r\n` : "";
-    const req = `CONNECT ${hostHeader}:${targetPort} HTTP/1.1\r\nHost: ${hostHeader}:${targetPort}\r\n${auth}User-Agent: Spider-Worker\r\nConnection: keep-alive\r\n\r\n`;
+    const req = `CONNECT ${hostHeader}:${targetPort} HTTP/1.1\r\nHost: ${hostHeader}:${targetPort}\r\n${auth}User-Agent: Rahgozar-Worker\r\nConnection: keep-alive\r\n\r\n`;
     const { data, headerEnd } = await withTimeout(writeTextAndReadHeaders(writer, reader, req), 2000);
     const head = new TextDecoder().decode(data.slice(0, headerEnd));
     if (!/^HTTP\/\d\.\d\s+200\b/m.test(head)) throw new Error(`proxy CONNECT failed: ${head.split("\r\n", 1)[0] || "unknown"}`);
@@ -814,7 +821,7 @@ async function openAdaptiveSocket(env, user, address, port, geo = null) {
 async function getSettings(env) {
   if (!(await kvReady(env))) return {};
   try {
-    const raw = await env.SPIDER_KV.get("settings");
+    const raw = await panelKV(env).get("settings");
     const data = raw ? JSON.parse(raw) : {};
     return data && typeof data === "object" ? data : {};
   } catch (_) { return {}; }
@@ -865,7 +872,7 @@ function routingSummary(geo = null, settings = null) {
 async function handleVlessWs(request, env, uuidFromPath) {
   const pathUuid = normalizeUuid(uuidFromPath);
   if (!pathUuid) return json({ error: "bad uuid" }, 400);
-  if (!(await kvReady(env))) return json({ error: "SPIDER_KV binding missing" }, 503);
+  if (!(await kvReady(env))) return json({ error: "RAHGOZAR_KV binding missing" }, 503);
 
   const pair = new WebSocketPair();
   const [client, server] = Object.values(pair);
@@ -1017,7 +1024,7 @@ export default {
       const kv = await kvReady(env);
       return json({
         ok: kv,
-        service: "SpiderPanel VLESS Worker",
+        service: "Rahgozar VLESS Worker",
         panel_domain: PANEL_DOMAIN,
         worker_domain: WORKER_DOMAIN,
         kv_bound: kv,
@@ -1030,12 +1037,12 @@ export default {
     // Panel → Worker control plane.
     if (path === "/panel/config" && request.method === "POST") {
       if (!authorized(request)) return json({ error: "Forbidden" }, 403);
-      if (!(await kvReady(env))) return json({ error: "SPIDER_KV binding missing" }, 503);
+      if (!(await kvReady(env))) return json({ error: "RAHGOZAR_KV binding missing" }, 503);
 
       let body;
       try { body = await request.json(); } catch (_) { return json({ error: "bad json" }, 400); }
       const users = Array.isArray(body.users) ? body.users : [];
-      const existing = await env.SPIDER_KV.list({ prefix: "user:" });
+      const existing = await panelKV(env).list({ prefix: "user:" });
       const keep = new Set();
       let written = 0;
       let traffic = 0;
@@ -1066,28 +1073,28 @@ export default {
       }
 
       for (const key of existing.keys || []) {
-        if (!keep.has(key.name)) await env.SPIDER_KV.delete(key.name);
+        if (!keep.has(key.name)) await panelKV(env).delete(key.name);
       }
       const incomingSettings = body.settings && typeof body.settings === "object" ? { ...body.settings } : {};
       if (body.proxies && typeof body.proxies === "object") incomingSettings.proxies = body.proxies;
       if (!incomingSettings.routing) incomingSettings.routing = { race: ROUTE_RACE, connect_timeout_ms: ROUTE_CONNECT_TIMEOUT_MS, geo_affinity: true, health_check_interval_ms: ROUTE_HEALTH_TTL_MS };
-      await env.SPIDER_KV.put("settings", JSON.stringify(incomingSettings));
-      await env.SPIDER_KV.put("heartbeat", JSON.stringify({ at: Date.now(), users: written }));
+      await panelKV(env).put("settings", JSON.stringify(incomingSettings));
+      await panelKV(env).put("heartbeat", JSON.stringify({ at: Date.now(), users: written }));
       return json({ ok: true, users: written, traffic, online });
     }
 
     if (path === "/panel/status" && request.method === "GET") {
       if (!authorized(request)) return json({ error: "Forbidden" }, 403);
-      if (!(await kvReady(env))) return json({ error: "SPIDER_KV binding missing" }, 503);
+      if (!(await kvReady(env))) return json({ error: "RAHGOZAR_KV binding missing" }, 503);
       const geo = requestGeo(request);
       const settings = await getSettings(env);
       await activeHealthCheck(env, geo);
       let users = 0, traffic = 0, online = 0;
       const now = Date.now() / 1000;
-      const list = await env.SPIDER_KV.list({ prefix: "user:" });
+      const list = await panelKV(env).list({ prefix: "user:" });
       for (const key of list.keys || []) {
         try {
-          const user = JSON.parse(await env.SPIDER_KV.get(key.name));
+          const user = JSON.parse(await panelKV(env).get(key.name));
           if (!user) continue;
           users++;
           traffic += Number(user.used_bytes || 0);
@@ -1101,7 +1108,7 @@ export default {
 
     if (path === "/panel/health-check" && request.method === "POST") {
       if (!authorized(request)) return json({ error: "Forbidden" }, 403);
-      if (!(await kvReady(env))) return json({ error: "SPIDER_KV binding missing" }, 503);
+      if (!(await kvReady(env))) return json({ error: "RAHGOZAR_KV binding missing" }, 503);
       lastHealthCheckAt = 0;
       const geo = requestGeo(request);
       const settings = await getSettings(env);
@@ -1112,13 +1119,13 @@ export default {
     // Internal worker admin API.
     if (path.startsWith("/api/")) {
       if (!authorized(request)) return json({ error: "Forbidden" }, 403);
-      if (!(await kvReady(env))) return json({ error: "SPIDER_KV binding missing" }, 503);
+      if (!(await kvReady(env))) return json({ error: "RAHGOZAR_KV binding missing" }, 503);
 
       if (path === "/api/users" && request.method === "GET") {
         const out = [];
-        const list = await env.SPIDER_KV.list({ prefix: "user:" });
+        const list = await panelKV(env).list({ prefix: "user:" });
         for (const key of list.keys || []) {
-          const raw = await env.SPIDER_KV.get(key.name);
+          const raw = await panelKV(env).get(key.name);
           if (raw) out.push(JSON.parse(raw));
         }
         return json({ ok: true, users: out });
@@ -1148,7 +1155,7 @@ export default {
         const uuid = normalizeUuid(path.split("/").pop());
         if (!uuid) return json({ error: "bad uuid" }, 400);
         if (request.method === "DELETE") {
-          await env.SPIDER_KV.delete(`user:${uuid}`);
+          await panelKV(env).delete(`user:${uuid}`);
           return json({ ok: true });
         }
         const user = await getUser(env, uuid);
