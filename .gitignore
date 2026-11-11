@@ -9,5 +9,6 @@ __pycache__/
 
 # Panel state (never commit secrets or live user data)
 rahgozar_state.json
+# Legacy state filename read once on migration
 spider_state.json
 data/*.json

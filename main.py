@@ -62,9 +62,19 @@ xhttp_router = None
 
 PANEL_PORT = 8080
 
+# Node / replication API keys use Rahgozar's own prefix. Keys issued by older
+# installations (`spdr_…`) are still accepted so existing nodes keep working.
+API_KEY_PREFIX = "rgzr_"
+LEGACY_API_KEY_PREFIX = "spdr_"
+
+
+def _api_key_has_prefix(value: str) -> bool:
+    key = str(value or "").strip()
+    return key.startswith(API_KEY_PREFIX) or key.startswith(LEGACY_API_KEY_PREFIX)
+
 
 def _env_port(default: int = PANEL_PORT) -> int:
-    """Return the canonical SpiderPanel listen port.
+    """Return the Rahgozar listen port.
 
     Provider-injected PORT values are intentionally ignored. The panel itself
     always listens on 8080; a platform reverse proxy may still expose another
@@ -244,8 +254,8 @@ async def load_state():
     global LINKS, AUTH, SUBS, USERS, SETTINGS, GROUPS, IP_POOL, IP_BLACKLIST, INBOUNDS, NODES, PENDING_NODE_DELETIONS
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        # Rahgozar keeps its own state file; fall back to the upstream
-        # SpiderPanel filename so existing data is not lost on upgrade.
+        # Rahgozar keeps its own state file; fall back to the legacy
+        # filename so data written by older builds is not lost on upgrade.
         source_file = DATA_FILE if DATA_FILE.exists() else DATA_DIR / "spider_state.json"
         if source_file.exists():
             async with aiofiles.open(source_file, "r", encoding="utf-8") as f:
@@ -283,9 +293,9 @@ async def load_state():
             legacy_key = str(SETTINGS.get("security_token") or "").strip()
             panel_key = str(SETTINGS.get("panel_api_key") or legacy_key or "").strip()
             if not panel_key:
-                panel_key = "spdr_" + secrets.token_urlsafe(24)
-            if not panel_key.startswith("spdr_"):
-                panel_key = "spdr_" + panel_key
+                panel_key = API_KEY_PREFIX + secrets.token_urlsafe(24)
+            if not _api_key_has_prefix(panel_key):
+                panel_key = API_KEY_PREFIX + panel_key
             SETTINGS["panel_api_key"] = panel_key
             SETTINGS["security_token"] = panel_key
             GROUPS.update(data.get("groups", {}))
@@ -479,7 +489,7 @@ SUBS_LOCK = asyncio.Lock()
 USERS: dict = {}
 USERS_LOCK = asyncio.Lock()
 
-# ── Remote nodes (other SpiderPanel instances we sync configs to) ──────────────
+# ── Remote nodes (other Rahgozar instances we sync configs to) ───────────────
 # node_id -> {domain, api_key, name, added_at, last_status, last_checked,
 #             latency_ms, user_count, error}
 NODES: dict = {}
@@ -490,9 +500,9 @@ NODE_HEARTBEAT_TASK = None
 
 # ── Settings ──────────────────────────────────────────────────────────────
 SETTINGS = {
-    # Canonical SpiderPanel-to-SpiderPanel API credential. `security_token`
+    # Canonical node-to-node API credential. `security_token`
     # remains as a backwards-compatible alias for older features.
-    "panel_api_key": "spdr_" + secrets.token_urlsafe(24),
+    "panel_api_key": API_KEY_PREFIX + secrets.token_urlsafe(24),
     "server_ip": "",
     "country": "",
     "country_code": "",
@@ -506,7 +516,7 @@ SETTINGS = {
     "bandwidth_limit_mbps": 100,
     "live_monitoring": True,
     "auto_ip_rotation": False,
-    "security_token": "spdr_" + secrets.token_urlsafe(24),
+    "security_token": API_KEY_PREFIX + secrets.token_urlsafe(24),
     # Custom backgrounds (uploaded by admin)
     "bg_login": "",
     "bg_dashboard": "",
@@ -616,7 +626,7 @@ WORKER: dict = {
     "control_token": "",
     # Panel domain injected into the worker so it can expose panel info.
     "panel_domain": "",
-    # KV namespace id + title for the worker's dedicated SPIDER_KV binding
+    # KV namespace id + title for the worker's dedicated RAHGOZAR_KV binding
     # ({worker_name}-db — one namespace per worker, never shared).
     "kv_namespace_id": "",
     "kv_namespace_title": "",
@@ -684,7 +694,7 @@ def log_activity(kind: str, message: str, level: str = "info"):
     })
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
-SESSION_COOKIE = "spider_session"
+SESSION_COOKIE = "rahgozar_session"
 SESSION_TTL = 60 * 60 * 24 * 7
 
 def hash_password(pw: str) -> str:
@@ -728,7 +738,7 @@ async def require_auth(request: Request):
     return token
 
 async def require_replication_auth(request: Request):
-    """Authenticate local admins with the session cookie or remote SpiderPanels
+    """Authenticate local admins with the session cookie or remote Rahgozar nodes
     with X-API-Key. The API-key path is intentionally used only on replication
     endpoints, never as a blanket replacement for the browser session."""
     token = request.cookies.get(SESSION_COOKIE)
@@ -736,7 +746,7 @@ async def require_replication_auth(request: Request):
         return {"kind": "session", "token": token}
     key = str(request.headers.get("X-API-Key") or "").strip()
     if not key:
-        # Backward compatibility with older SpiderPanel peers. New clients use X-API-Key.
+        # Backward compatibility with older nodes. New clients use X-API-Key.
         key = str(request.headers.get("X-Node-Key") or "").strip()
     async with SETTINGS_LOCK:
         expected = str(SETTINGS.get("panel_api_key") or SETTINGS.get("security_token") or "")
@@ -1461,17 +1471,17 @@ async def startup():
     asyncio.create_task(_xray_client_audit_loop())
     global BOT_SCHEDULER_TASK, BOT_POLL_TASK, BOT_EXPIRY_TASK
     if BOT_SCHEDULER_TASK is None or BOT_SCHEDULER_TASK.done():
-        BOT_SCHEDULER_TASK = asyncio.create_task(_channel_bot_loop(), name="spider-channel-bot")
+        BOT_SCHEDULER_TASK = asyncio.create_task(_channel_bot_loop(), name="rahgozar-channel-bot")
     if BOT_POLL_TASK is None or BOT_POLL_TASK.done():
-        BOT_POLL_TASK = asyncio.create_task(_sell_bot_loop(), name="spider-sell-bot")
+        BOT_POLL_TASK = asyncio.create_task(_sell_bot_loop(), name="rahgozar-sell-bot")
     if BOT_EXPIRY_TASK is None or BOT_EXPIRY_TASK.done():
-        BOT_EXPIRY_TASK = asyncio.create_task(_sell_bot_expiry_loop(), name="spider-expiry-sweeper")
+        BOT_EXPIRY_TASK = asyncio.create_task(_sell_bot_expiry_loop(), name="rahgozar-expiry-sweeper")
 
     # Start Telegram Proxy instances for all existing TG inbounds
     await _start_all_telegram_proxies()
     global NODE_HEARTBEAT_TASK
     if NODE_HEARTBEAT_TASK is None or NODE_HEARTBEAT_TASK.done():
-        NODE_HEARTBEAT_TASK = asyncio.create_task(_node_heartbeat_loop(), name="spider-node-heartbeat")
+        NODE_HEARTBEAT_TASK = asyncio.create_task(_node_heartbeat_loop(), name="rahgozar-node-heartbeat")
 
 
 # ── Telegram Proxy Lifecycle ────────────────────────────────────────────────
@@ -1560,12 +1570,12 @@ async def _stop_telegram_proxy(inbound_id: str):
     if is_docker_available():
         # Stop all containers for this inbound_id
         for i in range(10):  # Try up to 10 possible container names (for different secrets)
-            container_name = f"spider-tg-proxy-{inbound_id}-"
+            container_name = f"rahgozar-tg-proxy-{inbound_id}-"
             # We can't know the exact secret suffix, so we'll stop any matching
             import subprocess
             try:
                 result = subprocess.run(
-                    ["docker", "ps", "-a", "--filter", f"name=spider-tg-proxy-{inbound_id}-", "--format", "{{.Names}}"],
+                    ["docker", "ps", "-a", "--filter", f"name=rahgozar-tg-proxy-{inbound_id}-", "--format", "{{.Names}}"],
                     capture_output=True, text=True, timeout=10
                 )
                 for name in result.stdout.strip().split('\n'):
@@ -1693,7 +1703,7 @@ async def shutdown():
 # ── Public endpoint discovery ────────────────────────────────────────────────
 # A container cannot query "the internet" to magically learn a hostname that a
 # deployer has not assigned. The portable strategy is:
-#   1) explicit SpiderPanel public URL/domain env vars,
+#   1) explicit Rahgozar public URL/domain env vars,
 #   2) deployer-provided public URL/domain env vars,
 #   3) the real external Host/X-Forwarded-Host seen on an incoming request,
 #   4) a persisted value from a previous successful discovery.
@@ -1728,8 +1738,6 @@ except ValueError:
     PUBLIC_ENDPOINT_REFRESH_SECONDS = 60.0
 
 PUBLIC_ENDPOINT_ENV_VARS = (
-    "SPIDER_PANEL_PUBLIC_URL",
-    "SPIDER_PANEL_PUBLIC_DOMAIN",
     "RAHGOZAR_PANEL_PUBLIC_URL",
     "RAHGOZAR_PANEL_PUBLIC_DOMAIN",
     "PUBLIC_URL",
@@ -1833,11 +1841,11 @@ def _deployer_env_candidates() -> list[tuple[str, str, str]]:
     """Return (raw_value, source, variable_name) candidates."""
     out = []
 
-    # Explicit SpiderPanel configuration wins over provider defaults.
-    for var in ("SPIDER_PANEL_PUBLIC_URL", "SPIDER_PANEL_PUBLIC_DOMAIN"):
+    # Explicit Rahgozar configuration wins over provider defaults.
+    for var in ("RAHGOZAR_PANEL_PUBLIC_URL", "RAHGOZAR_PANEL_PUBLIC_DOMAIN"):
         val = str(os.environ.get(var) or "").strip()
         if val:
-            out.append((val, "spider-env", var))
+            out.append((val, "rahgozar-env", var))
 
     # Provider-native values. These are intentionally independent of Railway.
     provider_vars = (
@@ -2748,7 +2756,7 @@ def generate_user_config(user_id: str, user: dict, inbound_id: str = None, addr:
                   f"&fp=chrome&alpn=h2,http/1.1&mode={xmode}&extra={extra}")
     elif transport == "grpc":
         gs = (inbound.get("grpc_settings") or {}) if inbound else {}
-        service = str(gs.get("serviceName") or gs.get("service_name") or "spider").strip() or "spider"
+        service = str(gs.get("serviceName") or gs.get("service_name") or "rahgozar").strip() or "rahgozar"
         params = (f"encryption=none&security={security}&type=grpc"
                   f"&serviceName={quote(service)}&sni={quote(host)}"
                   f"&fp=chrome&alpn=h2,http/1.1")
@@ -3115,6 +3123,8 @@ async def deployment_ui_fixes(request: Request, call_next):
 
 # ── Telegram Proxy Module (merged from telegram_proxy.py) ──
 def derive_secret_from_uuid(config_uuid: str, salt: str = "spider-tg-proxy") -> str:
+    # The salt is a stable hash input: changing it would invalidate secrets
+    # derived for already-issued configs, so it is intentionally kept.
     """Return the exact 16-byte / 32-hex client secret expected by official MTProxy."""
     return hashlib.sha256(f"{salt}:{config_uuid}".encode()).hexdigest()[:32]
 
@@ -3600,7 +3610,7 @@ async def link_page(uuid: str, request: Request):
         headers={
             "profile-title": quote(username),
             "profile-update-interval": "12",
-            "support-url": "https://t.me/spider_vpn1",
+            "support-url": "https://t.me/ndnima",
         },
     )
 
@@ -3761,7 +3771,7 @@ async def sub_group_subscription(uuid_key: str, request: Request):
         media_type="text/plain",
         headers={
             "profile-title": quote(sub["name"]),
-            "support-url": "https://t.me/spider_vpn1",
+            "support-url": "https://t.me/ndnima",
             "profile-update-interval": "12",
         }
     )
@@ -3884,19 +3894,19 @@ async def server_info(_=Depends(require_replication_auth)):
 async def get_panel_api_key(_=Depends(require_auth)):
     async with SETTINGS_LOCK:
         key = _get_panel_api_key_sync()
-    return {"ok": True, "api_key": key, "prefix": "spdr_"}
+    return {"ok": True, "api_key": key, "prefix": API_KEY_PREFIX}
 
 
 @app.post("/api/panel-api-key/regenerate")
 async def regenerate_panel_api_key(_=Depends(require_auth)):
-    new_key = "spdr_" + secrets.token_urlsafe(24)
+    new_key = API_KEY_PREFIX + secrets.token_urlsafe(24)
     async with SETTINGS_LOCK:
         SETTINGS["panel_api_key"] = new_key
         SETTINGS["security_token"] = new_key
         SETTINGS["panel_api_key_rotated_at"] = datetime.now().isoformat()
     await save_state()
     log_activity("auth", "Rahgozar API Key regenerated", "warn")
-    return {"ok": True, "api_key": new_key, "prefix": "spdr_", "rotated_at": SETTINGS.get("panel_api_key_rotated_at")}
+    return {"ok": True, "api_key": new_key, "prefix": API_KEY_PREFIX, "rotated_at": SETTINGS.get("panel_api_key_rotated_at")}
 
 
 @app.post("/api/panel-api-key/verify")
@@ -3925,8 +3935,8 @@ async def api_me(request: Request):
 async def update_api_key(request: Request, token=Depends(require_auth)):
     body = await request.json()
     new_key = _normalize_node_key(body.get("api_key") or "")
-    if not new_key or not new_key.startswith("spdr_") or len(new_key) < 12:
-        raise HTTPException(status_code=400, detail="API key must use the spdr_ prefix")
+    if not new_key or not _api_key_has_prefix(new_key) or len(new_key) < 12:
+        raise HTTPException(status_code=400, detail="API key must use the rgzr_ prefix")
     async with SETTINGS_LOCK:
         SETTINGS["panel_api_key"] = new_key
         SETTINGS["security_token"] = new_key
@@ -4042,7 +4052,7 @@ async def get_activity(_=Depends(require_auth)):
 # The subject and the body are picked up from those keys; the date/time shown at
 # the end of the announcement comes from "date" when present, otherwise from the
 # last commit that touched the file, so an announcement always carries a date.
-NOTIF_REPO = os.environ.get("NOTIF_REPO", "amirh00sain/SpiderPanel")
+NOTIF_REPO = os.environ.get("NOTIF_REPO", "ndnimanima/rahgozar")
 NOTIF_PATH = (os.environ.get("NOTIF_PATH", "notif") or "notif").strip().strip("/")
 NOTIF_REF = os.environ.get("NOTIF_REF", "main")
 NOTIF_TTL = float(os.environ.get("NOTIF_TTL", "15"))
@@ -4068,7 +4078,7 @@ _NOTIF_COMMIT_RETRY = 600.0
 def _notif_headers() -> dict:
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": "SpiderPanel",
+        "User-Agent": "Rahgozar",
     }
     token = str(os.environ.get("GITHUB_TOKEN") or "").strip()
     if token:
@@ -4251,7 +4261,7 @@ async def _fetch_notifs() -> dict:
                         f"{NOTIF_PATH}/{quote(name)}"
                     )
                     try:
-                        cr = await client.get(raw_url, headers={"User-Agent": "SpiderPanel"})
+                        cr = await client.get(raw_url, headers={"User-Agent": "Rahgozar"})
                         raw = cr.text if cr.status_code == 200 else ""
                     except Exception:  # noqa: BLE001
                         raw = ""
@@ -4681,7 +4691,7 @@ async def create_inbound(request: Request, auth=Depends(require_replication_auth
     """Create an inbound locally, or ensure the managed default inbound for a remote Node."""
     body = await request.json()
     if auth.get("kind") == "api_key":
-        # Remote SpiderPanels only need the managed TLS+WS transport. Never let
+        # Remote nodes only need the managed TLS+WS transport. Never let
         # an API key create arbitrary admin inbounds on the target panel.
         async with INBOUNDS_LOCK:
             iid = find_default_tls_ws_inbound_id()
@@ -5080,7 +5090,7 @@ async def update_inbound(inbound_id: str, request: Request, _=Depends(require_au
 
 @app.post("/api/inbounds/{inbound_id}/generate-reality-keys")
 async def generate_inbound_reality_keys(inbound_id: str, _=Depends(require_auth)):
-    """Generate Reality x25519 key pair + short_id + spiderx for an inbound."""
+    """Generate Reality x25519 key pair, short_id and path for an inbound."""
     async with INBOUNDS_LOCK:
         ib = INBOUNDS.get(inbound_id)
         if not ib:
@@ -5258,7 +5268,7 @@ async def list_users(_=Depends(require_auth)):
     return {"users": result}
 
 async def _upsert_remote_user(body: dict) -> dict:
-    """Create/update a replica user from a trusted SpiderPanel API-key call."""
+    """Create/update a replica user from a trusted node API-key call."""
     username = str(body.get("username") or "").strip()[:40]
     config_uuid = str(body.get("config_uuid") or "").strip()
     if not username or not config_uuid or not _is_valid_uuid(config_uuid):
@@ -6116,9 +6126,9 @@ async def login_page(request: Request):
 async def dashboard_redirect(request: Request):
     return RedirectResponse(url="/rahgozar")
 
-@app.get("/spider", response_class=HTMLResponse)
+@app.get("/spider", response_class=HTMLResponse)  # legacy bookmark alias
 @app.get("/rahgozar", response_class=HTMLResponse)
-async def spider_panel(request: Request):
+async def panel_page(request: Request):
     if not await is_valid_session(request.cookies.get(SESSION_COOKIE)):
         return RedirectResponse(url="/login")
     await ensure_default_link()
@@ -6496,7 +6506,7 @@ async def update_help_settings(request: Request, _=Depends(require_auth)):
     return {"ok": True, **saved}
 
 
-# BACKUP / RESTORE - full SpiderPanel state
+# BACKUP / RESTORE - full Rahgozar state
 # ══════════════════════════════════════════════════════════════════════════════
 
 BACKUP_VERSION = 2
@@ -6556,7 +6566,7 @@ def _validate_backup_payload(payload: dict) -> dict:
     if not isinstance(state, dict):
         raise HTTPException(status_code=400, detail="ساختار فایل بکاپ نامعتبر است")
 
-    # Require a meaningful SpiderPanel state marker so arbitrary JSON cannot be
+    # Require a meaningful Rahgozar state marker so arbitrary JSON cannot be
     # accidentally imported over a live installation.
     required_any = ("users", "settings", "links", "inbounds", "groups", "worker")
     if not any(k in state for k in required_any):
@@ -6578,10 +6588,10 @@ def _validate_backup_payload(payload: dict) -> dict:
 
 @app.get("/api/settings/backup")
 async def download_backup(_=Depends(require_auth)):
-    """Download the complete current SpiderPanel state as a JSON file."""
+    """Download the complete current Rahgozar state as a JSON file."""
     payload = _build_backup_payload()
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-    filename = "spider-panel-backup-" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S") + ".json"
+    filename = "rahgozar-backup-" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S") + ".json"
     return Response(
         content=body,
         media_type="application/json; charset=utf-8",
@@ -6594,7 +6604,7 @@ async def download_backup(_=Depends(require_auth)):
 
 @app.post("/api/settings/restore")
 async def restore_backup(request: Request, _=Depends(require_auth)):
-    """Restore a downloaded SpiderPanel JSON backup atomically."""
+    """Restore a downloaded Rahgozar JSON backup atomically."""
     form = await request.form()
     file = form.get("file")
     if not file or not hasattr(file, "read"):
@@ -6615,7 +6625,7 @@ async def restore_backup(request: Request, _=Depends(require_auth)):
 
     # Do not mutate live state until the backup has been fully parsed and
     # validated. The disk write is also atomic so a failed restore cannot leave
-    # a half-written spider_state.json.
+    # a half-written legacy state file.
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     current_bytes = None
     if DATA_FILE.exists():
@@ -6672,18 +6682,18 @@ async def restore_backup(request: Request, _=Depends(require_auth)):
 
 @app.post("/api/settings/security-token/rotate")
 async def rotate_security_token(_=Depends(require_auth)):
-    """Legacy alias for SpiderPanel API-key regeneration."""
+    """Legacy alias for API-key regeneration."""
     return await regenerate_panel_api_key()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# REMOTE NODES — real SpiderPanel-to-SpiderPanel replication
+# REMOTE NODES — real Rahgozar-to-Rahgozar replication
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_panel_api_key_sync() -> str:
     key = str(SETTINGS.get("panel_api_key") or SETTINGS.get("security_token") or "").strip()
     if not key:
-        key = "spdr_" + secrets.token_urlsafe(24)
+        key = API_KEY_PREFIX + secrets.token_urlsafe(24)
         SETTINGS["panel_api_key"] = key
         SETTINGS["security_token"] = key
     return key
@@ -6691,13 +6701,13 @@ def _get_panel_api_key_sync() -> str:
 
 def _normalize_node_key(value: str) -> str:
     key = str(value or "").strip()
-    if key and not key.startswith("spdr_"):
-        return "spdr_" + key
+    if key and not _api_key_has_prefix(key):
+        return API_KEY_PREFIX + key
     return key
 
 
 def _normalize_node_base_url(domain: str) -> str:
-    """Normalize a remote SpiderPanel URL and enforce HTTPS except localhost."""
+    """Normalize a remote Rahgozar URL and enforce HTTPS except localhost."""
     from urllib.parse import urlsplit, urlunsplit
     raw = str(domain or "").strip()
     if not raw:
@@ -6820,7 +6830,7 @@ def _pending_delete_remove(node_id: str, config_uuid: str) -> None:
 
 
 async def _probe_node(node: dict) -> dict:
-    """Verify a remote SpiderPanel with GET /api/server-info and X-API-Key."""
+    """Verify a remote Rahgozar node with GET /api/server-info and X-API-Key."""
     base = _normalize_node_base_url(node.get("domain", ""))
     key = _normalize_node_key(node.get("api_key", ""))
     started = time.perf_counter()
@@ -6920,7 +6930,7 @@ async def _probe_node(node: dict) -> dict:
 
 
 async def _remote_request(node: dict, method: str, path: str, json_body=None, timeout: float = 15.0):
-    """Call a remote SpiderPanel using its stored API key."""
+    """Call a remote Rahgozar node using its stored API key."""
     base = _normalize_node_base_url(node.get("domain", ""))
     key = _normalize_node_key(node.get("api_key", ""))
     if not base or not key:
@@ -7031,8 +7041,8 @@ async def add_node(request: Request, _=Depends(require_auth)):
     body = await request.json()
     domain = _normalize_node_base_url(body.get("domain") or body.get("url") or "")
     raw_api_key = str(body.get("api_key") or body.get("spi_key") or "").strip()
-    if not raw_api_key or not raw_api_key.startswith("spdr_"):
-        raise HTTPException(status_code=400, detail="SPI Key باید با spdr_ شروع شود")
+    if not raw_api_key or not _api_key_has_prefix(raw_api_key):
+        raise HTTPException(status_code=400, detail="SPI Key باید با rgzr_ شروع شود")
     api_key = _normalize_node_key(raw_api_key)
     name = str(body.get("name") or "").strip()[:60]
     if not domain:
@@ -7082,13 +7092,13 @@ async def update_node(node_id: str, request: Request, _=Depends(require_auth)):
     name = str(body.get("name") or current.get("name") or "").strip()[:60]
     domain = _normalize_node_base_url(body.get("domain") if "domain" in body else current.get("domain"))
     raw_api_key = str(body.get("api_key") or "").strip()
-    if raw_api_key and not raw_api_key.startswith("spdr_"):
-        raise HTTPException(status_code=400, detail="SPI Key باید با spdr_ شروع شود")
+    if raw_api_key and not _api_key_has_prefix(raw_api_key):
+        raise HTTPException(status_code=400, detail="SPI Key باید با rgzr_ شروع شود")
     api_key = _normalize_node_key(raw_api_key if raw_api_key else current.get("api_key"))
     if not domain:
         raise HTTPException(status_code=400, detail="دامنه نود معتبر نیست")
-    if not api_key.startswith("spdr_"):
-        raise HTTPException(status_code=400, detail="SPI Key باید با spdr_ شروع شود")
+    if not _api_key_has_prefix(api_key):
+        raise HTTPException(status_code=400, detail="SPI Key باید با rgzr_ شروع شود")
     current.update({"name": name, "domain": domain, "url": domain, "api_key": api_key, "status": "checking"})
     probe = await _probe_node(current)
     if probe.get("status") != "online":
@@ -10599,7 +10609,7 @@ async def scan_railway_ips(_=Depends(require_auth)):
 # ══════════════════════════════════════════════════════════════════════════════
 
 CF_API = "https://api.cloudflare.com/client/v4"
-CF_TOKEN_LINK = "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%5D&accountId=*&zoneId=all&name=spider-Token"
+CF_TOKEN_LINK = "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%5D&accountId=*&zoneId=all&name=Rahgozar-Token"
 
 # Worker script deployed to the user's Cloudflare account lives in the project
 # at worker/worker.js (source of truth; deployment uploads it as _worker.js).
@@ -10726,7 +10736,7 @@ async def _ensure_worker_kv() -> str | None:
     if existing:
         return existing
     wname = str(WORKER.get("worker_name") or "").strip()
-    kv_title = f"{wname}-db" if wname else "spider-worker-kv"
+    kv_title = f"{wname}-db" if wname else "rahgozar-worker-kv"
     # List existing namespaces, reuse ours if a previous deploy created it.
     code, data = await _cf_api("GET", f"/accounts/{acct}/storage/kv/namespaces", cf_token, email="")
     if code == 200:
@@ -10766,8 +10776,8 @@ async def _ensure_tunnel_kv() -> str | None:
     if existing:
         return existing
     wname = str(WORKER.get("worker_name") or "").strip()
-    base = f"{wname}-db" if wname else "spider-worker-kv"
-    kv_title = f"{base}-tunnel"  # e.g. spider-a1b2c3-db-tunnel
+    base = f"{wname}-db" if wname else "rahgozar-worker-kv"
+    kv_title = f"{base}-tunnel"  # e.g. rahgozar-a1b2c3-db-tunnel
     code, data = await _cf_api("GET", f"/accounts/{acct}/storage/kv/namespaces", cf_token, email="")
     if code == 200:
         for ns in (data.get("result") or []):
@@ -10806,8 +10816,8 @@ async def _ensure_reverse_kv() -> str | None:
     if existing:
         return existing
     wname = str(WORKER.get("worker_name") or "").strip()
-    base = f"{wname}-db" if wname else "spider-worker-kv"
-    kv_title = f"{base}-reverse"  # e.g. spider-a1b2c3-db-reverse
+    base = f"{wname}-db" if wname else "rahgozar-worker-kv"
+    kv_title = f"{base}-reverse"  # e.g. rahgozar-a1b2c3-db-reverse
     code, data = await _cf_api("GET", f"/accounts/{acct}/storage/kv/namespaces", cf_token, email="")
     if code == 200:
         for ns in (data.get("result") or []):
@@ -10835,7 +10845,7 @@ async def _ensure_worker_pages_project(kv_id: str | None, tunnel_kv_id: str | No
     """Create/refresh a Cloudflare Pages project used for the managed worker.
 
     The Pages project runs the advanced-mode `_worker.js` file generated from
-    the local `worker/worker.js` source and binds the dedicated SPIDER_KV
+    the local `worker/worker.js` source and binds the dedicated RAHGOZAR_KV
     namespace (plus optional tunnel/reverse namespaces).
     """
     acct = str(WORKER.get("account_id") or "").strip()
@@ -10844,7 +10854,7 @@ async def _ensure_worker_pages_project(kv_id: str | None, tunnel_kv_id: str | No
     if not acct or not token or not name:
         return {"ok": False, "detail": "Cloudflare account, token or Pages project name missing"}
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", name):
-        name = "spider-" + secrets.token_hex(3)
+        name = "rahgozar-" + secrets.token_hex(3)
         async with WORKER_LOCK:
             WORKER["pages_project_name"] = name
             WORKER["worker_name"] = name
@@ -10852,7 +10862,7 @@ async def _ensure_worker_pages_project(kv_id: str | None, tunnel_kv_id: str | No
     def deployment_config():
         kvs = {}
         if kv_id:
-            kvs["SPIDER_KV"] = {"namespace_id": kv_id}
+            kvs["RAHGOZAR_KV"] = {"namespace_id": kv_id}
         if tunnel_kv_id:
             kvs["TUNNEL_KV"] = {"namespace_id": tunnel_kv_id}
         if reverse_kv_id:
@@ -10979,7 +10989,7 @@ async def _worker_deploy() -> tuple:
     if not project_name:
         return 0, {"errors": [{"message": "Pages project name missing"}]}
 
-    boundary = "----SpiderPages" + secrets.token_hex(12)
+    boundary = "----RahgozarPages" + secrets.token_hex(12)
     def field(name: str, value: str) -> bytes:
         return (
             f"--{boundary}\r\n"
@@ -10990,7 +11000,7 @@ async def _worker_deploy() -> tuple:
     body = bytearray()
     body += field("branch", "main")
     body += field("commit_dirty", "false")
-    body += field("commit_message", "SpiderPanel managed worker deploy")
+    body += field("commit_message", "Rahgozar managed worker deploy")
     body += field("manifest", manifest)
     body += (
         f"--{boundary}\r\n"
@@ -11548,7 +11558,7 @@ async def worker_setup(request: Request, _=Depends(require_auth)):
 
     The supplied Cloudflare API token is validated first. A dedicated KV
     namespace is created/attached, then the project is deployed in Pages
-    Advanced Mode with `_worker.js` and the SPIDER_KV binding.
+    Advanced Mode with `_worker.js` and the RAHGOZAR_KV binding.
     """
     body = await request.json()
     token = str(body.get("token") or "").strip()
@@ -11590,7 +11600,7 @@ async def worker_setup(request: Request, _=Depends(require_auth)):
 
     worker_name = str(body.get("worker_name") or "").strip().lower()
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", worker_name or ""):
-        worker_name = "spider-" + secrets.token_hex(3)
+        worker_name = "rahgozar-" + secrets.token_hex(3)
 
     stable_domain = f"{worker_name}.pages.dev"
 
@@ -12563,7 +12573,7 @@ async def _create_bot_user(body: dict) -> dict:
                 "http://127.0.0.1:8080/api/users",
                 json=body,
                 cookies={SESSION_COOKIE: token},
-                headers={"X-Spider-Bot": "1"},
+                headers={"X-Rahgozar-Bot": "1"},
                 timeout=30.0,
             )
         finally:
@@ -12591,7 +12601,7 @@ async def _delete_bot_user(user_id: str) -> None:
             r = await client.delete(
                 f"http://127.0.0.1:8080/api/users/{quote(str(user_id), safe='')}",
                 cookies={SESSION_COOKIE: token},
-                headers={"X-Spider-Bot": "1"},
+                headers={"X-Rahgozar-Bot": "1"},
                 timeout=30.0,
             )
         finally:
