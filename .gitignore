@@ -1,0 +1,13 @@
+# Local development / runtime artifacts
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.log
+.env
+.DS_Store
+
+# Panel state (never commit secrets or live user data)
+rahgozar_state.json
+spider_state.json
+data/*.json

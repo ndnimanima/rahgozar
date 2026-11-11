@@ -655,10 +655,6 @@ function applyLang(){
   document.title = d.title;
   document.getElementById("brandName").textContent = d.brand;
   document.getElementById("foot").textContent = d.foot + " \u2022 v" + (window.rzVer || "1.0.0");
-  try{ fetch("/api/public/version").then(function(r){ return r.json(); }).then(function(j){
-    if (j && j.version && j.version !== window.rzVer){ window.rzVer = j.version;
-      document.getElementById("foot").textContent = (TR[L]||TR.fa).foot + " \u2022 v" + j.version; }
-  }).catch(function(){}); }catch(e){}
   ["jTitle","copySubL","copyAllL","copyB64L","qrCloseL","qcCloseL"].forEach(function(id){
     var el = document.getElementById(id); if (el) el.textContent = d[id.replace("L","")] !== undefined ? d[id.replace("L","")] : el.textContent;
   });
