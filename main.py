@@ -1037,7 +1037,7 @@ async def _ensure_xray() -> bool:
 @app.on_event("startup")
 async def startup():
     global http_client
-    limits = httpx.Limits(max_connections=500, max_keepalive_connections=100)
+    limits = httpx.Limits(max_connections=100, max_keepalive_connections=30)
     timeout = httpx.Timeout(30.0, connect=10.0)
     http_client = httpx.AsyncClient(
         limits=limits, timeout=timeout, follow_redirects=True,
@@ -1449,14 +1449,11 @@ async def startup():
     if _up_changed:
         asyncio.create_task(save_state())
 
-    # Ensure Xray is installed and serving reality BEFORE the panel is fully up,
-    # so reality configs work immediately (not in a background task).
-    await _ensure_xray()
-    if _xray_bin_path().exists():
-        try:
-            await _xray_apply()
-        except Exception as e:
-            logger.warning(f"Xray apply on boot failed: {e}")
+    # Xray is installed in the background so the panel starts quickly (important
+    # on free-tier hosts with slow/network-limited startup). Reality configs keep
+    # working because _xray_apply() is re-invoked on every config change, so no
+    # user-facing breakage occurs while Xray downloads.
+    asyncio.create_task(_ensure_xray())
     log_activity("system", "سرور راه‌اندازی شد", "ok")
     logger.info(f"Rahgozar started on port {CONFIG['port']}")
     # Include XHTTP router for xhttp-siz10 endpoints (already merged into main.py)
